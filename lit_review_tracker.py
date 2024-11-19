@@ -24,7 +24,7 @@ def print_authors(authors):
                 print('\t\t', end="")
             print(f'{author["name"]}', end=", " if i < min(len(authors) - 1, 2) else end)
 
-def get_paper_universe_with_multiplicity(paper_ids, ignore_super_cited):
+def get_paper_universe_with_multiplicity(paper_ids, ignore_super_cited, use_multiplicity=True):
     print(f"calling api for {len(paper_ids)} papers")
     r = requests.post(
         'https://api.semanticscholar.org/graph/v1/paper/batch',
@@ -51,6 +51,8 @@ def get_paper_universe_with_multiplicity(paper_ids, ignore_super_cited):
             for citation in response['citations']:
                 paper_universe_with_multiplicity.append((citation['paperId'], citation['title']))
 
+    if not use_multiplicity:
+        paper_universe_with_multiplicity = list(set(paper_universe_with_multiplicity))
 
     return paper_universe_with_multiplicity, input_paper_titles
 
@@ -62,12 +64,13 @@ def get_full_data_for_papers(paper_universe_with_multiplicity):
     )
     return r.json()
 
-def filter_papers_by_subfield(r_json, target_subfield, max_papers=MAX_PAPERS_TO_READ):
+def filter_papers_by_subfield(r_json, target_subfield, ranking_metric, max_papers=MAX_PAPERS_TO_READ):
     openai.api_key = os.environ['OPENAI_API_KEY']
     client = openai.OpenAI()
     filtered_r_json = []
-    r_json.sort(key=lambda x: x['citationCount'] if x is not None else 0, reverse=True)
+    r_json.sort(key=lambda x: get_metric_val(x, ranking_metric) if x is not None else 0, reverse=True)
     og_len = len(r_json)
+    pdb.set_trace()
     r_json = r_json[:max_papers]
     print(f'Max num filter {og_len} -> {len(r_json)}')
 
@@ -96,6 +99,23 @@ def filter_papers_by_subfield(r_json, target_subfield, max_papers=MAX_PAPERS_TO_
                     print(f'DELETE {response["title"]}')
     return filtered_r_json
 
+def get_metric_val(response, metric_type):
+    if metric_type == 'citations':
+        return response['citationCount']
+    elif metric_type == 'influential_citations':
+        return response['influentialCitationCount']
+    elif metric_type == 'citations_per_day':
+        publication_date = response['publicationDate']
+        if publication_date:
+            publication_date = datetime.datetime.strptime(publication_date, '%Y-%m-%d')
+            days_since_publication = (datetime.datetime.now() - publication_date).days
+        else:
+            if response['year'] is not None:
+                days_since_publication = (datetime.datetime.now() - datetime.datetime(response['year'], 1, 1)).days
+            else:
+                print(f'Warning: no publication date for {response["title"]}')
+                days_since_publication = 365
+        return response['citationCount'] / days_since_publication
 
 def get_paper_citation_counts(r_json, ranking_metric):
     paper_citation_counts = defaultdict(int)
@@ -106,22 +126,7 @@ def get_paper_citation_counts(r_json, ranking_metric):
         else:
             if response['title'] is not None:
                 title_author_map[response['title']] = response['authors']
-                if ranking_metric == 'citations':
-                    paper_citation_counts[response['title']] += response['citationCount']
-                elif ranking_metric == 'influential_citations':
-                    paper_citation_counts[response['title']] += response['influentialCitationCount']
-                elif ranking_metric == 'citations_per_day':
-                    publication_date = response['publicationDate']
-                    if publication_date:
-                        publication_date = datetime.datetime.strptime(publication_date, '%Y-%m-%d')
-                        days_since_publication = (datetime.datetime.now() - publication_date).days
-                    else:
-                        if response['year'] is not None:
-                            days_since_publication = (datetime.datetime.now() - datetime.datetime(response['year'], 1, 1)).days
-                        else:
-                            print(f'Warning: no publication date for {response["title"]}')
-                            days_since_publication = 365
-                    paper_citation_counts[response['title']] += response['citationCount'] / days_since_publication
+                paper_citation_counts[response['title']] += get_metric_val(response, ranking_metric)
     
     return paper_citation_counts, title_author_map
 
@@ -151,7 +156,7 @@ if __name__ == '__main__':
         if len(paper_ids) == 0:
             print('No more papers, exiting')
             break
-        paper_universe_with_multiplicity, input_paper_titles = get_paper_universe_with_multiplicity(paper_ids, args.ignore_super_cited)
+        paper_universe_with_multiplicity, input_paper_titles = get_paper_universe_with_multiplicity(paper_ids, args.ignore_super_cited, use_multiplicity=False)
         for title in input_paper_titles:
             seen_papers.add(title)
         print(f'Got {len(paper_universe_with_multiplicity)} papers for filtering/ranking')
@@ -162,7 +167,7 @@ if __name__ == '__main__':
 
         if args.target_subfield_filter is not None:
             max_papers = min(args.num_papers_to_read, MAX_PAPERS_TO_READ) if args.num_papers_to_read is not None else MAX_PAPERS_TO_READ
-            r_json = filter_papers_by_subfield(r_json, args.target_subfield_filter, max_papers=max_papers)
+            r_json = filter_papers_by_subfield(r_json, args.target_subfield_filter, args.ranking_metric, max_papers=max_papers)
             print(f'Filtered to {len(r_json)} papers')
 
 
