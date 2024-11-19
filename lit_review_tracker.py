@@ -7,6 +7,8 @@ import argparse
 import datetime
 import openai
 import os
+import random
+MAX_PAPERS_TO_READ = 100
 
 try:
     with open('request_cache.json', 'r') as f:
@@ -14,98 +16,114 @@ try:
 except:
     request_cache = {}
 
-try:
-    with open('finished_papers.csv', 'r') as f:
-        finished_papers = set(f.read().splitlines())
-except:
-    finished_papers = set()
+def print_authors(authors):
+    end = "...\n" if len(authors) > 3 else "\n"
+    for i, author in enumerate(authors[:3]):
+        if 'name' in author:
+            if i == 0:
+                print('\t\t', end="")
+            print(f'{author["name"]}', end=", " if i < min(len(authors) - 1, 2) else end)
 
-    def get_paper_universe_with_multiplicity(args):
-        r = requests.post(
-            'https://api.semanticscholar.org/graph/v1/paper/batch',
-            params={'fields': 'referenceCount,citationCount,influentialCitationCount,title,url,abstract,tldr,references,citations'},
-            json={"ids": args.paper_ids}
-        )
+def get_paper_universe_with_multiplicity(paper_ids, ignore_super_cited):
+    print(f"calling api for {len(paper_ids)} papers")
+    r = requests.post(
+        'https://api.semanticscholar.org/graph/v1/paper/batch',
+        params={'fields': 'referenceCount,citationCount,influentialCitationCount,title,url,abstract,tldr,references,citations,paperId,authors'},
+        json={"ids": paper_ids}
+    )
+    if r.status_code == 400:
+        raise Exception("Bad request - received 400 status code from Semantic Scholar API")
 
-        for response in r.json():
-            request_cache[response['url']] = response
+    input_paper_titles = []
+    for response in r.json():
+        input_paper_titles.append(response['title'])
+        request_cache[response['url']] = response
 
-        with open('request_cache.json', 'w') as f:
-            json.dump(request_cache, f)
+    with open('request_cache.json', 'w') as f:
+        json.dump(request_cache, f)
 
-        paper_universe_with_multiplicity = []
+    paper_universe_with_multiplicity = []
 
-        for response in r.json():
-            for ref in response['references']:
-                paper_universe_with_multiplicity.append((ref['paperId'], ref['title']))
+    for response in r.json():
+        for ref in response['references']:
+            paper_universe_with_multiplicity.append((ref['paperId'], ref['title']))
+        if len(response['citations']) < ignore_super_cited:
             for citation in response['citations']:
-                paper_universe_with_multiplicity.append((citation['paperId'], ref['title']))
+                paper_universe_with_multiplicity.append((citation['paperId'], citation['title']))
 
-        return paper_universe_with_multiplicity
 
-    def get_full_data_for_papers(paper_universe_with_multiplicity):
-        r = requests.post(
-            'https://api.semanticscholar.org/graph/v1/paper/batch',
-            params={'fields': 'referenceCount,citationCount,influentialCitationCount,publicationDate,year,title,url,abstract,tldr,references,citations'},
-            json={"ids": [x[0] for x in paper_universe_with_multiplicity]}
-        )
-        return r.json()
+    return paper_universe_with_multiplicity, input_paper_titles
 
-    def filter_papers_by_subfield(r_json, target_subfield):
-        openai.api_key = os.environ['OPENAI_API_KEY']
-        client = openai.OpenAI()
-        filtered_r_json = []
-        for response in r_json:
-            if response is None:
-                continue
-            else:
-                abstract = response['abstract']
-                if abstract is not None:
-                    query = f'Determine if the following paper is in the {target_subfield} subfield using the abstract:\n{abstract}\n Is this paper in the {target_subfield} subfield? Answer yes or no.'
-                    completion = client.chat.completions.create(
-                        model="gpt-4o-mini",
-                        messages=[
-                            {"role": "system", "content": "You are a helpful assistant."},
-                            {
-                                "role": "user",
-                                "content": query
-                            }
-                        ]
-                    )
-                    answer = completion.choices[0].message.content.lower()
-                    if 'yes' in answer:
-                        filtered_r_json.append(response)
-                        print(f'INCLUDE {response["title"]}')
+def get_full_data_for_papers(paper_universe_with_multiplicity):
+    r = requests.post(
+        'https://api.semanticscholar.org/graph/v1/paper/batch',
+        params={'fields': 'referenceCount,citationCount,influentialCitationCount,publicationDate,year,title,url,abstract,tldr,references,citations,paperId,authors'},
+        json={"ids": [x[0] for x in paper_universe_with_multiplicity]}
+    )
+    return r.json()
+
+def filter_papers_by_subfield(r_json, target_subfield, max_papers=MAX_PAPERS_TO_READ):
+    openai.api_key = os.environ['OPENAI_API_KEY']
+    client = openai.OpenAI()
+    filtered_r_json = []
+    r_json.sort(key=lambda x: x['citationCount'] if x is not None else 0, reverse=True)
+    og_len = len(r_json)
+    r_json = r_json[:max_papers]
+    print(f'Max num filter {og_len} -> {len(r_json)}')
+
+    for response in r_json:
+        if response is None:
+            continue
+        else:
+            abstract = response['abstract']
+            if abstract is not None:
+                query = f'Determine if the following paper is in the {target_subfield} subfield using the abstract:\n{abstract}\n Is this paper in the {target_subfield} subfield? Answer yes or no.'
+                completion = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": "You are a helpful assistant."},
+                        {
+                            "role": "user",
+                            "content": query
+                        }
+                    ]
+                )
+                answer = completion.choices[0].message.content.lower()
+                if 'yes' in answer:
+                    filtered_r_json.append(response)
+                    print(f'INCLUDE {response["title"]}')
+                else:
+                    print(f'DELETE {response["title"]}')
+    return filtered_r_json
+
+
+def get_paper_citation_counts(r_json, ranking_metric):
+    paper_citation_counts = defaultdict(int)
+    title_author_map = {}
+    for response in r_json:
+        if response is None:
+            pass
+        else:
+            if response['title'] is not None:
+                title_author_map[response['title']] = response['authors']
+                if ranking_metric == 'citations':
+                    paper_citation_counts[response['title']] += response['citationCount']
+                elif ranking_metric == 'influential_citations':
+                    paper_citation_counts[response['title']] += response['influentialCitationCount']
+                elif ranking_metric == 'citations_per_day':
+                    publication_date = response['publicationDate']
+                    if publication_date:
+                        publication_date = datetime.datetime.strptime(publication_date, '%Y-%m-%d')
+                        days_since_publication = (datetime.datetime.now() - publication_date).days
                     else:
-                        print(f'DELETE {response["title"]}')
-        return filtered_r_json
-
-
-    def get_paper_citation_counts(r_json, ranking_metric):
-        paper_citation_counts = defaultdict(int)
-        for response in r_json:
-            if response is None:
-                pass
-            else:
-                if response['title'] is not None:
-                    if ranking_metric == 'citations':
-                        paper_citation_counts[response['title']] += response['citationCount']
-                    elif ranking_metric == 'influential_citations':
-                        paper_citation_counts[response['title']] += response['influentialCitationCount']
-                    elif ranking_metric == 'citations_per_day':
-                        publication_date = response['publicationDate']
-                        if publication_date:
-                            publication_date = datetime.datetime.strptime(publication_date, '%Y-%m-%d')
-                            days_since_publication = (datetime.datetime.now() - publication_date).days
+                        if response['year'] is not None:
+                            days_since_publication = (datetime.datetime.now() - datetime.datetime(response['year'], 1, 1)).days
                         else:
-                            if response['year'] is not None:
-                                days_since_publication = (datetime.datetime.now() - datetime.datetime(response['year'], 1, 1)).days
-                            else:
-                                print(f'Warning: no publication date for {response["title"]}')
-                                days_since_publication = 365
-                        paper_citation_counts[response['title']] += response['citationCount'] / days_since_publication
-        
-        return paper_citation_counts
+                            print(f'Warning: no publication date for {response["title"]}')
+                            days_since_publication = 365
+                    paper_citation_counts[response['title']] += response['citationCount'] / days_since_publication
+    
+    return paper_citation_counts, title_author_map
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Analyze papers from Semantic Scholar')
@@ -117,19 +135,40 @@ if __name__ == '__main__':
     parser.add_argument('--num_papers_to_read', type=int, help='Number of papers to read', required=False, default=None)
     parser.add_argument('--paper_description_type', choices=['None', 'abstract', 'tldr'], help='Type of paper description to use', required=False, default='tldr')
     parser.add_argument('--target_subfield_filter', help='Target subfield to read papers in', required=False, default=None)
+    parser.add_argument('--k_steps', type=int, help='Number of steps to take in the paper graph', required=False, default=1)
+    parser.add_argument('--ignore_super_cited', type=int, help='Ignore papers with more than this number of citations when searching for citations', required=False, default=500)
     args = parser.parse_args()
 
+    paper_ids = args.paper_ids
 
-    value_metric = 'influentialCitationCount' #'citationCount'
-    # ids = ["ARXIV:2409.11321"]
+    seen_papers = set()
 
-    paper_universe_with_multiplicity = get_paper_universe_with_multiplicity(args)
-    r_json = get_full_data_for_papers(paper_universe_with_multiplicity)
-    if args.target_subfield_filter is not None:
-        if args.num_papers_to_read is not None:
-            r_json = r_json[:args.num_papers_to_read]
-        r_json = filter_papers_by_subfield(r_json, args.target_subfield_filter)
-    paper_citation_counts = get_paper_citation_counts(r_json, args.ranking_metric)
+    if args.k_steps > 1:
+        print("Warning: k_steps > 1 is experimental. It seems to work better to use k=1, and input a larger number of papers.")
+
+    for k in range(args.k_steps):
+        print(f'Step {k}')
+        if len(paper_ids) == 0:
+            print('No more papers, exiting')
+            break
+        paper_universe_with_multiplicity, input_paper_titles = get_paper_universe_with_multiplicity(paper_ids, args.ignore_super_cited)
+        for title in input_paper_titles:
+            seen_papers.add(title)
+        print(f'Got {len(paper_universe_with_multiplicity)} papers for filtering/ranking')
+        if len(paper_universe_with_multiplicity) > 500:
+            print('Warning: more than 500 papers. Sampling to 500')
+            paper_universe_with_multiplicity = random.sample(paper_universe_with_multiplicity, 500)
+        r_json = get_full_data_for_papers(paper_universe_with_multiplicity)
+
+        if args.target_subfield_filter is not None:
+            max_papers = min(args.num_papers_to_read, MAX_PAPERS_TO_READ) if args.num_papers_to_read is not None else MAX_PAPERS_TO_READ
+            r_json = filter_papers_by_subfield(r_json, args.target_subfield_filter, max_papers=max_papers)
+            print(f'Filtered to {len(r_json)} papers')
+
+
+        paper_ids = [x['paperId'] for x in r_json if x['title'] not in seen_papers]
+    paper_citation_counts, title_author_map = get_paper_citation_counts(r_json, args.ranking_metric)
+    print(f'Got {len(paper_citation_counts)} papers with citation metric {args.ranking_metric}')
 
 
     if args.completed_paper_list is not None:
@@ -153,6 +192,7 @@ if __name__ == '__main__':
         else:
             print('')
             print(f'{math.log(count + 1) + 1:<5.2f}\t{paper}')
+            print_authors(title_author_map[paper])
             has_read = False
             if args.interactive_mode:
                 has_read_input = input('\tHave you read this paper? (y/n)\n')
