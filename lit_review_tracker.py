@@ -25,7 +25,7 @@ def print_authors(authors):
             print(f'{author["name"]}', end=", " if i < min(len(authors) - 1, 2) else end)
 
 def get_paper_universe_with_multiplicity(paper_ids, ignore_super_cited, use_multiplicity=True):
-    print(f"calling api for {len(paper_ids)} papers")
+    print(f"calling semantic scholar api for {len(paper_ids)} papers")
     r = requests.post(
         'https://api.semanticscholar.org/graph/v1/paper/batch',
         params={'fields': 'referenceCount,citationCount,influentialCitationCount,title,url,abstract,tldr,references,citations,paperId,authors'},
@@ -163,7 +163,7 @@ if __name__ == '__main__':
             seen_papers.add(title)
         print(f'Got {len(paper_universe_with_multiplicity)} papers for filtering/ranking')
         if len(paper_universe_with_multiplicity) > 500:
-            print('Warning: more than 500 papers. Sampling to 500')
+            print('Warning: more than 500 papers. Sampling to 500 (this may cause some papers to be missed. Future versions will fix this)')
             paper_universe_with_multiplicity = random.sample(paper_universe_with_multiplicity, 500)
         r_json = get_full_data_for_papers(paper_universe_with_multiplicity)
 
