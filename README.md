@@ -1,9 +1,14 @@
-This is a tool for literature review that 1. helps find useful papers and 2. quantifies how much of an expert you are in a particular subfield (so you know once you've read enough).
+This is a tool for literature review that helps find useful papers, and quantifies how much of an expert you are in a particular subfield (so you know once you've read enough and can get back to experiments)  
 
 Here's an example usage:
 
 ```
-python lit_review_tracker.py --paper_ids "ARXIV:2409.11321" "ARXIV:1802.09568" "ARXIV:1703.04782" --ranking_metric citations_per_day --target_subfield_filter Optimizers --k_steps 1 --max_num_papers_to_read 100
+python lit_review_tracker.py \
+    --paper_ids "ARXIV:2409.11321" "ARXIV:1802.09568" "ARXIV:1703.04782" \
+    --ranking_metric citations_per_day \
+    --target_subfield_filter Optimizers \
+    --k_steps 1 \
+    --max_num_papers_to_read 100
 ```
 
 You need to seed it with several papers that you want to use as a starting point. This uses semantic scholar format for paper ids, so if there is not an arxiv version of the paper, you can use the ID from the semantic scholar page, e.g. 
@@ -31,6 +36,7 @@ The +1 is to prevent log(0)
 
 ## Sample output
 
+```
 python lit_review_tracker.py --paper_ids "ARXIV:2409.11321" "ARXIV:1802.09568" "ARXIV:1703.04782" --ranking_metric citations_per_day --target_subfield_filter Optimizers --k_steps 1 --max_num_papers_to_read 100 --completed_paper_list empty_file                                           
 Step 0
 calling api for 3 papers
