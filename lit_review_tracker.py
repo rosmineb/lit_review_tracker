@@ -21,7 +21,7 @@ def print_authors(authors):
     for i, author in enumerate(authors[:3]):
         if 'name' in author:
             if i == 0:
-                print('\t\t', end="")
+                print('\t\t\t\t', end="")
             print(f'{author["name"]}', end=", " if i < min(len(authors) - 1, 2) else end)
 
 def get_paper_universe_with_multiplicity(paper_ids, ignore_super_cited, use_multiplicity=True):
@@ -70,7 +70,6 @@ def filter_papers_by_subfield(r_json, target_subfield, ranking_metric, max_paper
     filtered_r_json = []
     r_json.sort(key=lambda x: get_metric_val(x, ranking_metric) if x is not None else 0, reverse=True)
     og_len = len(r_json)
-    pdb.set_trace()
     r_json = r_json[:max_papers]
     print(f'Max num filter {og_len} -> {len(r_json)}')
 
@@ -94,9 +93,9 @@ def filter_papers_by_subfield(r_json, target_subfield, ranking_metric, max_paper
                 answer = completion.choices[0].message.content.lower()
                 if 'yes' in answer:
                     filtered_r_json.append(response)
-                    print(f'INCLUDE {response["title"]}')
+                    print(f'INCLUDE: {response["title"]}')
                 else:
-                    print(f'DELETE {response["title"]}')
+                    print(f'REMOVE FOR NON-RELEVANCE: {response["title"]}')
     return filtered_r_json
 
 def get_metric_val(response, metric_type):
@@ -119,16 +118,19 @@ def get_metric_val(response, metric_type):
 
 def get_paper_citation_counts(r_json, ranking_metric):
     paper_citation_counts = defaultdict(int)
-    title_author_map = {}
+    title_metadata_map = {}
     for response in r_json:
         if response is None:
             pass
         else:
             if response['title'] is not None:
-                title_author_map[response['title']] = response['authors']
+                title_metadata_map[response['title']] = (response['authors'], response['publicationDate'])
                 paper_citation_counts[response['title']] += get_metric_val(response, ranking_metric)
     
-    return paper_citation_counts, title_author_map
+    return paper_citation_counts, title_metadata_map
+
+def score_function(ranking_metric_value):
+    return math.log(ranking_metric_value + 1)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Analyze papers from Semantic Scholar')
@@ -137,7 +139,7 @@ if __name__ == '__main__':
     parser.add_argument('--interactive_mode', action='store_true', help='Whether to run in interactive mode', required=False, default=False)
     parser.add_argument('--ranking_metric', type=str, choices=['citations', 'influential_citations', 'citations_per_day'], 
                         help='Metric to use for ranking papers', required=False, default='citations')
-    parser.add_argument('--num_papers_to_read', type=int, help='Number of papers to read', required=False, default=None)
+    parser.add_argument('--max_num_papers_to_read', type=int, help='Number of papers to read', required=False, default=None)
     parser.add_argument('--paper_description_type', choices=['None', 'abstract', 'tldr'], help='Type of paper description to use', required=False, default='tldr')
     parser.add_argument('--target_subfield_filter', help='Target subfield to read papers in', required=False, default=None)
     parser.add_argument('--k_steps', type=int, help='Number of steps to take in the paper graph', required=False, default=1)
@@ -166,16 +168,17 @@ if __name__ == '__main__':
         r_json = get_full_data_for_papers(paper_universe_with_multiplicity)
 
         if args.target_subfield_filter is not None:
-            max_papers = min(args.num_papers_to_read, MAX_PAPERS_TO_READ) if args.num_papers_to_read is not None else MAX_PAPERS_TO_READ
+            max_papers = min(args.max_num_papers_to_read, MAX_PAPERS_TO_READ) if args.max_num_papers_to_read is not None else MAX_PAPERS_TO_READ
             r_json = filter_papers_by_subfield(r_json, args.target_subfield_filter, args.ranking_metric, max_papers=max_papers)
             print(f'Filtered to {len(r_json)} papers')
 
 
         paper_ids = [x['paperId'] for x in r_json if x['title'] not in seen_papers]
-    paper_citation_counts, title_author_map = get_paper_citation_counts(r_json, args.ranking_metric)
+    paper_citation_counts, title_metadata_map = get_paper_citation_counts(r_json, args.ranking_metric)
     print(f'Got {len(paper_citation_counts)} papers with citation metric {args.ranking_metric}')
 
 
+    completed_papers = None
     if args.completed_paper_list is not None:
         with open(args.completed_paper_list, 'r') as f:
             completed_papers = set(f.read().splitlines())
@@ -189,20 +192,22 @@ if __name__ == '__main__':
         assert args.completed_paper_list is not None, 'Interactive mode requires a completed paper list'
 
     to_read = []
-    print(f'{args.ranking_metric:10}\tPaper Title')
+    print(f'Publish Date\t{args.ranking_metric:10}\tPaper Title')
     for paper, count in ordered_paper_citation_counts:
-        total_possible_score += math.log(count + 1) + 1
-        if paper in completed_papers:
-            read_score += math.log(count + 1) + 1
+        paper_score = score_function(count)
+        total_possible_score += paper_score
+        if completed_papers and paper in completed_papers:
+            read_score += paper_score
         else:
             print('')
-            print(f'{math.log(count + 1) + 1:<5.2f}\t{paper}')
-            print_authors(title_author_map[paper])
+            authors, publish_date = title_metadata_map[paper]
+            print(f'{publish_date}\t{paper_score:<5.2f}\t{paper}')
+            print_authors(authors)
             has_read = False
             if args.interactive_mode:
                 has_read_input = input('\tHave you read this paper? (y/n)\n')
                 if has_read_input.lower() == 'y':
-                    read_score += math.log(count + 1) + 1
+                    read_score += paper_score
                     completed_papers.add(paper)
                     has_read = True
                 if has_read_input.lower() == 'q':
@@ -211,14 +216,15 @@ if __name__ == '__main__':
                     args.interactive_mode = False
             if not has_read:
                 to_read.append((count, paper))
-        if args.num_papers_to_read is not None:
-            if len(to_read) >= args.num_papers_to_read:
+        if args.max_num_papers_to_read is not None:
+            if len(to_read) >= args.max_num_papers_to_read:
                 break
     if args.interactive_mode:
         with open(args.completed_paper_list, 'w') as f:
             for paper in completed_papers:
                 f.write(f'{paper}\n')
                 
-    print(f'Total possible score: {total_possible_score}')
-    print(f'Read score: {read_score}')
-    print(f'Fraction of possible score read: {read_score / total_possible_score}')
+    if completed_papers is not None:
+        print(f'Total possible score: {total_possible_score}')
+        print(f'Read score: {read_score}')
+        print(f'Fraction of possible score read: {read_score / total_possible_score}')
