@@ -144,6 +144,7 @@ if __name__ == '__main__':
     parser.add_argument('--target_subfield_filter', help='Target subfield to read papers in', required=False, default=None)
     parser.add_argument('--k_steps', type=int, help='Number of steps to take in the paper graph', required=False, default=1)
     parser.add_argument('--ignore_super_cited', type=int, help='Ignore papers with more than this number of citations when searching for citations', required=False, default=500)
+    parser.add_argument('--earliest_paper_year', type=int, help='Earliest year to consider when searching for papers', required=False, default=1900)
     args = parser.parse_args()
 
     paper_ids = args.paper_ids
@@ -193,14 +194,20 @@ if __name__ == '__main__':
 
     to_read = []
     print(f'Publish Date\t{args.ranking_metric:10}\tPaper Title')
+
     for paper, count in ordered_paper_citation_counts:
+        authors, publish_date = title_metadata_map[paper]
+
+        if args.earliest_paper_year is not None:
+            if publish_date is None or datetime.datetime.strptime(publish_date, '%Y-%m-%d').year < args.earliest_paper_year:
+                continue
+
         paper_score = score_function(count)
         total_possible_score += paper_score
         if completed_papers and paper in completed_papers:
             read_score += paper_score
         else:
             print('')
-            authors, publish_date = title_metadata_map[paper]
             print(f'{publish_date}\t{paper_score:<5.2f}\t{paper}')
             print_authors(authors)
             has_read = False
